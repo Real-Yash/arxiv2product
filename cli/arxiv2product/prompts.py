@@ -3,6 +3,15 @@ from textwrap import dedent
 
 DEFAULT_MODEL = "anthropic/claude-sonnet-4"
 
+QUERY_PLANNER_PREMISE = dedent("""\
+    You create concise web search queries for a research-to-product pipeline.
+
+    Rules:
+    - Return at most 2 search queries
+    - Output one raw query per line
+    - No bullets, numbering, commentary, or explanation
+    - Prefer specific search terms over long natural-language sentences""")
+
 DECOMPOSER_PREMISE = dedent("""\
     You are a world-class systems architect who reads research papers to extract
     ATOMIC TECHNICAL PRIMITIVES — the smallest reusable building blocks the paper
@@ -33,7 +42,7 @@ PAIN_SCANNER_PREMISE = dedent("""\
     - **Severity**: 🔴 HAIR_ON_FIRE / 🟡 SIGNIFICANT / 🟢 NICE_TO_HAVE
     - **Which primitive**: maps to which technical primitive
 
-    Use web_search sparingly for concrete market evidence. Prioritize the strongest
+    Use the provided external market evidence when available. Prioritize the strongest
     buyer pain over exhaustive coverage.""")
 
 CROSSPOLLINATOR_PREMISE = dedent("""\
@@ -103,7 +112,7 @@ TEMPORAL_PREMISE = dedent("""\
     - **Compounding papers**: which 1-2 recent papers combine with this one
     - **First customer**: who you sell to day 1
 
-    Use web_search sparingly for recent related papers and industry trends.""")
+    Use the provided external evidence for recent related papers and industry trends.""")
 
 DESTROYER_PREMISE = dedent("""\
     You are the most brutal, honest startup critic alive. You have seen 10,000

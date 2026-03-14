@@ -7,6 +7,13 @@ from typing import Awaitable
 import httpx
 from agentica import spawn
 
+from .backend import (
+    AGENTICA_BACKEND,
+    OPENAI_COMPATIBLE_BACKEND,
+    OpenAICompatibleBackend,
+    build_openai_compatible_backend,
+    get_execution_backend_name,
+)
 from .errors import AgentExecutionError, AgenticaConnectionError
 from .ingestion import fetch_paper
 from .models import PaperContent
@@ -17,6 +24,7 @@ from .prompts import (
     DESTROYER_PREMISE,
     INFRA_INVERSION_PREMISE,
     PAIN_SCANNER_PREMISE,
+    QUERY_PLANNER_PREMISE,
     SYNTHESIZER_PREMISE,
     TEMPORAL_PREMISE,
 )
@@ -36,12 +44,12 @@ PRIORITY_SECTION_KEYS = [
     "discussion",
 ]
 SPAWN_TIMEOUT_SECONDS = 30.0
-FULL_SECTION_CHARS = 8_000
-FULL_CONTEXT_CHARS = 80_000
+FULL_SECTION_CHARS = 5_000
+FULL_CONTEXT_CHARS = 25_000
 COMPACT_SECTION_CHARS = 2_500
-COMPACT_CONTEXT_CHARS = 18_000
-FULL_FIGURE_COUNT = 20
-FULL_TABLE_COUNT = 10
+COMPACT_CONTEXT_CHARS = 10_000
+FULL_FIGURE_COUNT = 15
+FULL_TABLE_COUNT = 6
 FULL_REFERENCE_COUNT = 30
 COMPACT_FIGURE_COUNT = 6
 COMPACT_TABLE_COUNT = 4
@@ -49,6 +57,16 @@ COMPACT_REFERENCE_COUNT = 10
 PRIMITIVE_SUMMARY_CHARS = 4_500
 PAIN_SUMMARY_CHARS = 3_000
 IDEA_SUMMARY_CHARS = 2_500
+QUERY_MAX_TOKENS = 120
+PHASE_MAX_TOKENS = {
+    "technical primitive extraction": 2200,
+    "pain scanner": 1600,
+    "infrastructure inversion": 1400,
+    "temporal arbitrage": 1400,
+    "cross-pollination": 1600,
+    "red team destruction": 1600,
+    "final synthesis": 1800,
+}
 
 
 def _get_speed_profile() -> str:
@@ -57,7 +75,7 @@ def _get_speed_profile() -> str:
 
 
 def _get_phase_timeout_seconds() -> float:
-    default = 180.0 if _get_speed_profile() == "balanced" else 300.0
+    default = 360.0 if _get_speed_profile() == "balanced" else 480.0
     raw_value = os.getenv("AGENT_PHASE_TIMEOUT_SECONDS", str(default))
     try:
         value = float(raw_value)
@@ -89,6 +107,10 @@ def _phase_finished(label: str, started_at: float, details: str = "") -> None:
     elapsed = perf_counter() - started_at
     suffix = f" {details}" if details else ""
     print(f"  ✅ {label} complete in {elapsed:.1f}s{suffix}")
+
+
+def _phase_max_tokens(phase: str) -> int | None:
+    return PHASE_MAX_TOKENS.get(phase)
 
 
 def _agentica_connection_help() -> str:
@@ -133,6 +155,12 @@ def _format_agent_error(phase: str, exc: BaseException) -> str:
     return f"{phase} failed with {exc.__class__.__name__}: {exc}"
 
 
+def _format_direct_error(phase: str, exc: BaseException) -> str:
+    if isinstance(exc, asyncio.TimeoutError):
+        return f"{phase} timed out while waiting for the direct execution backend."
+    return f"{phase} failed with {exc.__class__.__name__}: {exc}"
+
+
 async def call_agent_text(
     agent,
     prompt: str,
@@ -157,6 +185,30 @@ async def call_agent_text(
                 pass  # best-effort; don't mask the real error
 
 
+async def call_direct_text(
+    backend: OpenAICompatibleBackend,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    phase: str,
+    model: str,
+    max_tokens: int | None = None,
+) -> str:
+    try:
+        return await asyncio.wait_for(
+            backend.generate_text(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=model,
+                phase=phase,
+                max_tokens=max_tokens,
+            ),
+            timeout=_get_phase_timeout_seconds(),
+        )
+    except BaseException as exc:
+        raise AgentExecutionError(_format_direct_error(phase, exc)) from exc
+
+
 async def gather_agent_calls(calls: dict[str, Awaitable[str]]) -> dict[str, str]:
     names = list(calls)
     results = await asyncio.gather(*(calls[name] for name in names), return_exceptions=True)
@@ -173,6 +225,78 @@ async def gather_agent_calls(calls: dict[str, Awaitable[str]]) -> dict[str, str]
         raise AgentExecutionError(" | ".join(failures))
 
     return outputs
+
+
+def _parse_search_queries(text: str) -> list[str]:
+    queries: list[str] = []
+    seen: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip().lstrip("-*0123456789. ").strip()
+        if len(line) < 8:
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        queries.append(line)
+    return queries[:2]
+
+
+def _fallback_queries(
+    *,
+    phase: str,
+    paper: PaperContent,
+) -> list[str]:
+    if phase == "pain scanner":
+        return [
+            f"{paper.title} enterprise pain budget current market",
+            f"{paper.title} customer pain companies spending current",
+        ]
+    return [
+        f"{paper.title} related paper 2025 2026",
+        f"{paper.title} industry trend startup adoption 2025 2026",
+    ]
+
+
+async def build_search_packet(
+    *,
+    backend: OpenAICompatibleBackend,
+    paper: PaperContent,
+    primitives_summary: str,
+    trace: SearchTrace,
+    phase: str,
+    default_intent: str,
+    model: str,
+) -> str:
+    planner_prompt = (
+        f"Paper title: {paper.title}\n"
+        f"Abstract: {paper.abstract}\n\n"
+        f"Technical primitives summary:\n{primitives_summary}\n\n"
+        f"Generate the best web search queries for the {phase} phase."
+    )
+    try:
+        planned = await call_direct_text(
+            backend,
+            system_prompt=QUERY_PLANNER_PREMISE,
+            user_prompt=planner_prompt,
+            phase=f"{phase} search planning",
+            model=model,
+            max_tokens=QUERY_MAX_TOKENS,
+        )
+        queries = _parse_search_queries(planned)
+    except AgentExecutionError:
+        queries = []
+
+    if not queries:
+        queries = _fallback_queries(phase=phase, paper=paper)
+
+    search_tool = make_web_search_tool(
+        default_intent=default_intent,
+        trace=trace,
+    )
+    packets: list[str] = []
+    for query in queries[:2]:
+        packets.append(f"QUERY: {query}\n{await search_tool(query)}")
+    return "\n\n".join(packets)
 
 
 def _collect_key_sections(
@@ -249,8 +373,8 @@ def build_compact_paper_context(
     )
 
 
-async def run_pipeline(arxiv_id_or_url: str, model: str = DEFAULT_MODEL) -> str:
-    """Run the multi-agent paper analysis pipeline and write the markdown report."""
+async def _run_pipeline_with_agentica(arxiv_id_or_url: str, model: str = DEFAULT_MODEL) -> str:
+    """Run the pipeline using Agentica as the execution backend."""
     speed_profile = _get_speed_profile()
     print(f"📄 Fetching paper: {arxiv_id_or_url}")
     paper = await fetch_paper(arxiv_id_or_url)
@@ -275,7 +399,7 @@ async def run_pipeline(arxiv_id_or_url: str, model: str = DEFAULT_MODEL) -> str:
     )
     print(f"🧠 Downstream context: {len(compact_context)} chars")
 
-    phase_started_at = _phase_started("🚀 Phase 2A: Running pain scanner and infrastructure inversion...")
+    phase_started_at = _phase_started("🚀 Phase 2: Running parallel analysis agents...")
     pain_trace = SearchTrace(section_name="Market Pain Mapping")
     temporal_trace = SearchTrace(section_name="Temporal Arbitrage")
 
@@ -290,6 +414,16 @@ async def run_pipeline(arxiv_id_or_url: str, model: str = DEFAULT_MODEL) -> str:
         },
     )
     infra_agent = await spawn_agent(premise=INFRA_INVERSION_PREMISE, model=model)
+    temporal_agent = await spawn_agent(
+        premise=TEMPORAL_PREMISE,
+        model=model,
+        scope={
+            "web_search": make_web_search_tool(
+                default_intent="fresh",
+                trace=temporal_trace,
+            )
+        },
+    )
 
     pain_task = call_agent_text(
         pain_agent,
@@ -307,37 +441,7 @@ async def run_pipeline(arxiv_id_or_url: str, model: str = DEFAULT_MODEL) -> str:
         "What products solve those second-order problems?",
         phase="infrastructure inversion",
     )
-
-    phase_two_results = await gather_agent_calls(
-        {
-            "pain scanner": pain_task,
-            "infrastructure inversion": infra_task,
-        }
-    )
-    pain_raw = phase_two_results["pain scanner"]
-    infra_raw = phase_two_results["infrastructure inversion"]
-    _phase_finished(
-        "Phase 2A",
-        phase_started_at,
-        details=(
-            f"(pain web calls={pain_trace.calls_used}"
-            + (", budget hit" if pain_trace.budget_exhausted else "")
-            + ")"
-        ),
-    )
-
-    phase_started_at = _phase_started("🕒 Phase 2B: Running temporal arbitrage...")
-    temporal_agent = await spawn_agent(
-        premise=TEMPORAL_PREMISE,
-        model=model,
-        scope={
-            "web_search": make_web_search_tool(
-                default_intent="fresh",
-                trace=temporal_trace,
-            )
-        },
-    )
-    temporal_raw = await call_agent_text(
+    temporal_task = call_agent_text(
         temporal_agent,
         f"Paper context:\n{compact_context}\n\n"
         f"Technical primitives:\n{primitives_summary}\n\n"
@@ -346,13 +450,22 @@ async def run_pipeline(arxiv_id_or_url: str, model: str = DEFAULT_MODEL) -> str:
         "papers and industry trends.",
         phase="temporal arbitrage",
     )
+
+    phase_two_results = await gather_agent_calls(
+        {
+            "pain scanner": pain_task,
+            "infrastructure inversion": infra_task,
+            "temporal arbitrage": temporal_task,
+        }
+    )
+    pain_raw = phase_two_results["pain scanner"]
+    infra_raw = phase_two_results["infrastructure inversion"]
+    temporal_raw = phase_two_results["temporal arbitrage"]
     _phase_finished(
-        "Phase 2B",
+        "Phase 2",
         phase_started_at,
         details=(
-            f"(temporal web calls={temporal_trace.calls_used}"
-            + (", budget hit" if temporal_trace.budget_exhausted else "")
-            + ")"
+            f"(pain web calls={pain_trace.calls_used}, temporal web calls={temporal_trace.calls_used})"
         ),
     )
 
@@ -437,3 +550,212 @@ async def run_pipeline(arxiv_id_or_url: str, model: str = DEFAULT_MODEL) -> str:
     print(f"\n✅ Done! Report saved to: {output_path}")
     print(f"   {len(report)} chars, ~{len(report.splitlines())} lines")
     return str(output_path)
+
+
+async def _run_pipeline_with_openai_compatible(
+    arxiv_id_or_url: str,
+    model: str,
+    backend: OpenAICompatibleBackend,
+) -> str:
+    print(f"📄 Fetching paper: {arxiv_id_or_url}")
+    paper = await fetch_paper(arxiv_id_or_url)
+    print(f"✅ Loaded: {paper.title} ({len(paper.full_text)} chars)")
+    print("⚙️ Execution backend: openai_compatible")
+    print(f"⚙️ Speed profile: {_get_speed_profile()}")
+
+    full_context = build_full_paper_context(paper)
+    print(f"🧠 Phase 1 context: {len(full_context)} chars")
+
+    phase_started_at = _phase_started("🔬 Phase 1: Extracting technical primitives...")
+    primitives_raw = await call_direct_text(
+        backend,
+        system_prompt=DECOMPOSER_PREMISE,
+        user_prompt=(
+            "Analyze this paper and extract all atomic technical primitives:\n\n"
+            f"{full_context}"
+        ),
+        phase="technical primitive extraction",
+        model=model,
+        max_tokens=_phase_max_tokens("technical primitive extraction"),
+    )
+    _phase_finished("Phase 1", phase_started_at)
+
+    primitives_summary = _truncate_text(primitives_raw, PRIMITIVE_SUMMARY_CHARS)
+    compact_context = build_compact_paper_context(
+        paper,
+        primitives_summary=primitives_summary,
+    )
+    print(f"🧠 Downstream context: {len(compact_context)} chars")
+
+    pain_trace = SearchTrace(section_name="Market Pain Mapping")
+    temporal_trace = SearchTrace(section_name="Temporal Arbitrage")
+
+    phase_started_at = _phase_started("🚀 Phase 2: Running parallel analysis backend calls...")
+    pain_trace = SearchTrace(section_name="Market Pain Mapping")
+    temporal_trace = SearchTrace(section_name="Temporal Arbitrage")
+
+    async def get_pain_raw():
+        pain_search_packet = await build_search_packet(
+            backend=backend,
+            paper=paper,
+            primitives_summary=primitives_summary,
+            trace=pain_trace,
+            phase="pain scanner",
+            default_intent="fast",
+            model=model,
+        )
+        return await call_direct_text(
+            backend,
+            system_prompt=PAIN_SCANNER_PREMISE,
+            user_prompt=(
+                f"Technical primitives:\n{primitives_summary}\n\n"
+                f"Paper context:\n{compact_context}\n\n"
+                f"External market evidence:\n{pain_search_packet}\n\n"
+                "Find the strongest current market pain points linked to these primitives."
+            ),
+            phase="pain scanner",
+            model=model,
+            max_tokens=_phase_max_tokens("pain scanner"),
+        )
+
+    async def get_infra_raw():
+        return await call_direct_text(
+            backend,
+            system_prompt=INFRA_INVERSION_PREMISE,
+            user_prompt=(
+                f"Paper context:\n{compact_context}\n\n"
+                f"Technical primitives:\n{primitives_summary}\n\n"
+                "What new problems does widespread adoption of this technique create?"
+            ),
+            phase="infrastructure inversion",
+            model=model,
+            max_tokens=_phase_max_tokens("infrastructure inversion"),
+        )
+
+    async def get_temporal_raw():
+        temporal_search_packet = await build_search_packet(
+            backend=backend,
+            paper=paper,
+            primitives_summary=primitives_summary,
+            trace=temporal_trace,
+            phase="temporal arbitrage",
+            default_intent="fresh",
+            model=model,
+        )
+        return await call_direct_text(
+            backend,
+            system_prompt=TEMPORAL_PREMISE,
+            user_prompt=(
+                f"Paper context:\n{compact_context}\n\n"
+                f"Technical primitives:\n{primitives_summary}\n\n"
+                f"External evidence:\n{temporal_search_packet}\n\n"
+                "Identify temporal arbitrage windows for the paper."
+            ),
+            phase="temporal arbitrage",
+            model=model,
+            max_tokens=_phase_max_tokens("temporal arbitrage"),
+        )
+
+    phase_two_results = await gather_agent_calls(
+        {
+            "pain scanner": get_pain_raw(),
+            "infrastructure inversion": get_infra_raw(),
+            "temporal arbitrage": get_temporal_raw(),
+        }
+    )
+    pain_raw = phase_two_results["pain scanner"]
+    infra_raw = phase_two_results["infrastructure inversion"]
+    temporal_raw = phase_two_results["temporal arbitrage"]
+    _phase_finished(
+        "Phase 2",
+        phase_started_at,
+        details=(
+            f"(pain web calls={pain_trace.calls_used}, temporal web calls={temporal_trace.calls_used})"
+        ),
+    )
+
+    phase_started_at = _phase_started("🧬 Phase 3: Cross-pollination...")
+    crosspoll_raw = await call_direct_text(
+        backend,
+        system_prompt=CROSSPOLLINATOR_PREMISE,
+        user_prompt=(
+            f"Technical primitives:\n{primitives_summary}\n\n"
+            f"Market pain points found:\n{_truncate_text(pain_raw, PAIN_SUMMARY_CHARS)}\n\n"
+            "Force non-obvious cross-pollination. Skip direct or obvious matches."
+        ),
+        phase="cross-pollination",
+        model=model,
+        max_tokens=_phase_max_tokens("cross-pollination"),
+    )
+    _phase_finished("Phase 3", phase_started_at)
+
+    phase_started_at = _phase_started("💀 Phase 4: Red team destruction...")
+    all_ideas = (
+        f"=== IDEAS FROM PAIN MAPPING ===\n{_truncate_text(pain_raw, IDEA_SUMMARY_CHARS)}\n\n"
+        f"=== IDEAS FROM CROSS-POLLINATION ===\n{_truncate_text(crosspoll_raw, IDEA_SUMMARY_CHARS)}\n\n"
+        f"=== IDEAS FROM INFRASTRUCTURE INVERSION ===\n{_truncate_text(infra_raw, IDEA_SUMMARY_CHARS)}\n\n"
+        f"=== IDEAS FROM TEMPORAL ARBITRAGE ===\n{_truncate_text(temporal_raw, IDEA_SUMMARY_CHARS)}\n\n"
+    )
+    redteam_raw = await call_direct_text(
+        backend,
+        system_prompt=DESTROYER_PREMISE,
+        user_prompt=(
+            "Here are product ideas from a research paper. Destroy every one.\n\n"
+            f"Paper: {paper.title}\n\n{all_ideas}"
+        ),
+        phase="red team destruction",
+        model=model,
+        max_tokens=_phase_max_tokens("red team destruction"),
+    )
+    _phase_finished("Phase 4", phase_started_at, details="(direct backend, no live red-team search)")
+
+    phase_started_at = _phase_started("🎯 Phase 5: Final synthesis...")
+    final_raw = await call_direct_text(
+        backend,
+        system_prompt=SYNTHESIZER_PREMISE,
+        user_prompt=(
+            f"PAPER: {paper.title}\nABSTRACT: {paper.abstract}\n\n"
+            f"=== TECHNICAL PRIMITIVES ===\n{primitives_summary}\n\n"
+            f"=== MARKET PAIN MAPPING ===\n{_truncate_text(pain_raw, IDEA_SUMMARY_CHARS)}\n\n"
+            f"=== CROSS-POLLINATED IDEAS ===\n{_truncate_text(crosspoll_raw, IDEA_SUMMARY_CHARS)}\n\n"
+            f"=== INFRASTRUCTURE INVERSION ===\n{_truncate_text(infra_raw, IDEA_SUMMARY_CHARS)}\n\n"
+            f"=== TEMPORAL ARBITRAGE ===\n{_truncate_text(temporal_raw, IDEA_SUMMARY_CHARS)}\n\n"
+            f"=== RED TEAM DESTRUCTION RESULTS ===\n{_truncate_text(redteam_raw, IDEA_SUMMARY_CHARS)}\n\n"
+            "Synthesize all of the above into a final ranked list of the best ideas."
+        ),
+        phase="final synthesis",
+        model=model,
+        max_tokens=_phase_max_tokens("final synthesis"),
+    )
+    _phase_finished("Phase 5", phase_started_at)
+
+    report = build_report(
+        paper=paper,
+        primitives=primitives_raw,
+        pain=pain_raw,
+        pain_sources=pain_trace.render_markdown(),
+        crosspoll=crosspoll_raw,
+        infra=infra_raw,
+        temporal=temporal_raw,
+        temporal_sources=temporal_trace.render_markdown(),
+        redteam=redteam_raw,
+        redteam_sources="",
+        final=final_raw,
+    )
+
+    safe_id = paper.arxiv_id.replace("/", "_").replace(".", "_")
+    output_path = Path(f"products_{safe_id}.md")
+    output_path.write_text(report, encoding="utf-8")
+
+    print(f"\n✅ Done! Report saved to: {output_path}")
+    print(f"   {len(report)} chars, ~{len(report.splitlines())} lines")
+    return str(output_path)
+
+
+async def run_pipeline(arxiv_id_or_url: str, model: str = DEFAULT_MODEL) -> str:
+    """Run the paper-to-product pipeline using the configured execution backend."""
+    backend_name = get_execution_backend_name()
+    if backend_name == OPENAI_COMPATIBLE_BACKEND:
+        backend = build_openai_compatible_backend()
+        return await _run_pipeline_with_openai_compatible(arxiv_id_or_url, model, backend)
+    return await _run_pipeline_with_agentica(arxiv_id_or_url, model)

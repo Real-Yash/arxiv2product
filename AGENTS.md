@@ -1,28 +1,28 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is currently a small Python application centered on [`main.py`](/home/ab916/src/arxiv2product/main.py). That file contains the full pipeline: arXiv ingestion, PDF parsing, agent prompts, report synthesis, and the CLI entrypoint. Project metadata lives in [`pyproject.toml`](/home/ab916/src/arxiv2product/pyproject.toml), and the `uv` lockfile is [`uv.lock`](/home/ab916/src/arxiv2product/uv.lock). Generated reports should stay out of version control unless they are part of a reviewed example.
+This repository is a plain monorepo workspace, not a root `uv` project. The Python CLI/API app lives in [`cli/`](/home/ab916/src/arxiv2product/cli), with package code under [`cli/arxiv2product/`](/home/ab916/src/arxiv2product/cli/arxiv2product) and tests under [`cli/tests/`](/home/ab916/src/arxiv2product/cli/tests). The Next.js frontend lives in [`apps/web/`](/home/ab916/src/arxiv2product/apps/web). Generated reports, logs, and local SQLite data should stay out of version control.
 
 ## Build, Test, and Development Commands
-Use `uv` for local setup and execution:
+Run commands from the app you are working on:
 
-- `uv sync`: create/update the local environment from `pyproject.toml` and `uv.lock`.
-- `uv run python main.py 2603.09229`: run the pipeline against an arXiv ID.
-- `uv run python main.py https://alphaxiv.org/abs/2603.09229 anthropic/claude-sonnet-4`: run with an explicit model override.
+- `cd cli && uv sync`: install/update the Python environment.
+- `cd cli && uv run arxiv2product 2603.09229`: generate a report from an arXiv ID.
+- `cd cli && uv run arxiv2product-api`: start the local Python API service.
+- `cd cli && python -m unittest discover -s tests`: run the Python test suite.
+- `cd apps/web && bun install`: install web dependencies.
+- `cd apps/web && bun run dev`: start the frontend locally.
 
-Before running, export required secrets:
-
-- `export AGENTICA_API_KEY=...`
-- `export SERPER_API_KEY=...` for live web search instead of the stub.
+Root helpers exist via [`Makefile`](/home/ab916/src/arxiv2product/Makefile): `make cli-sync`, `make api`, `make web`, and `make test`.
 
 ## Coding Style & Naming Conventions
-Follow existing Python style in `main.py`: 4-space indentation, type hints on public functions, `snake_case` for functions and variables, `UPPER_SNAKE_CASE` for prompt constants, and small dataclasses for structured payloads. Keep orchestration logic asynchronous (`async`/`await`) and prefer focused helper functions over adding more inline logic to the CLI path.
+Follow existing Python conventions in [`cli/arxiv2product/`](/home/ab916/src/arxiv2product/cli/arxiv2product): 4-space indentation, type hints on public functions, `snake_case` for functions/variables, and `UPPER_SNAKE_CASE` for prompt constants. Keep orchestration async where it already is. In the web app, preserve the current App Router + TypeScript structure and keep UI changes consistent with the established design system in [`apps/web/app/globals.css`](/home/ab916/src/arxiv2product/apps/web/app/globals.css).
 
 ## Testing Guidelines
-There is no `tests/` directory yet. Add tests under `tests/` using `test_<feature>.py` naming, and prefer `pytest` for new coverage. Prioritize unit tests for pure helpers such as PDF parsing, arXiv ID normalization, reference extraction, and markdown report building. For agent-driven flows, mock network and model calls rather than hitting external services.
+Python tests live in [`cli/tests/`](/home/ab916/src/arxiv2product/cli/tests) and use `unittest`. Add new test files as `test_<feature>.py`. Prefer mocked network/model calls for pipeline and service coverage. For web changes, at minimum run `./node_modules/.bin/tsc --noEmit` from [`apps/web/`](/home/ab916/src/arxiv2product/apps/web) before shipping.
 
 ## Commit & Pull Request Guidelines
-This repository has no commit history yet, so use clear imperative commit subjects such as `Add pytest coverage for report builder`. Keep commits scoped to one change. Pull requests should include: purpose, key implementation notes, local verification commands, and sample output or screenshots if the markdown report format changes.
+Use short imperative commit subjects such as `Move Python app into cli workspace` or `Simplify dashboard layout`. Keep commits scoped to one concern. Pull requests should include: purpose, key structural changes, local verification commands, and screenshots for notable UI updates.
 
 ## Configuration Notes
-`main.py` imports `agentica`, `arxiv`, `httpx`, and `pdfplumber`, but they are not currently declared in [`pyproject.toml`](/home/ab916/src/arxiv2product/pyproject.toml). Update dependencies and refresh `uv.lock` whenever runtime imports change.
+Python environment examples now live in [`cli/.env.example`](/home/ab916/src/arxiv2product/cli/.env.example). Web environment examples live in [`apps/web/.env.example`](/home/ab916/src/arxiv2product/apps/web/.env.example). Do not reintroduce Python package-manager metadata at the repo root.

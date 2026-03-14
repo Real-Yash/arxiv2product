@@ -3,4 +3,4 @@ class AgenticaConnectionError(RuntimeError):
 
 
 class AgentExecutionError(RuntimeError):
-    """Raised when an Agentica invocation fails or times out."""
+    """Raised when an execution backend invocation fails or times out."""

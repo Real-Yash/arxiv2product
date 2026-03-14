@@ -1,24 +1,30 @@
 import asyncio
+import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 from .errors import AgentExecutionError, AgenticaConnectionError
 from .prompts import DEFAULT_MODEL
 
-load_dotenv()
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = PACKAGE_ROOT.parent
+
+load_dotenv(PACKAGE_ROOT / ".env")
+load_dotenv(WORKSPACE_ROOT / ".env")
 
 
 USAGE = """\
-Usage: python main.py <arxiv_id_or_url> [model]
+Usage: uv run arxiv2product <arxiv_id_or_url> [model]
+   or: uv run python main.py <arxiv_id_or_url> [model]
    or: python -m arxiv2product <arxiv_id_or_url> [model]
-   or: arxiv2product <arxiv_id_or_url> [model]
 
 Examples:
-  python main.py 2603.09229
+  uv run arxiv2product 2603.09229
+  uv run python main.py 2603.09229
   python -m arxiv2product 2603.09229
-  python main.py https://alphaxiv.org/abs/2603.09229
-  python main.py 2603.09229 openrouter:google/gemini-2.5-pro
+  uv run arxiv2product https://alphaxiv.org/abs/2603.09229 openrouter:google/gemini-2.5-pro
 """
 
 
@@ -30,7 +36,7 @@ async def main() -> None:
     from .pipeline import run_pipeline
 
     paper_id = sys.argv[1]
-    model = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_MODEL
+    model = sys.argv[2] if len(sys.argv) > 2 else os.getenv("ARXIV2PRODUCT_MODEL", DEFAULT_MODEL)
     try:
         await run_pipeline(paper_id, model=model)
     except AgenticaConnectionError as exc:
