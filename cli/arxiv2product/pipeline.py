@@ -29,6 +29,8 @@ from .prompts import (
     SYNTHESIZER_PREMISE,
     TEMPORAL_PREMISE,
 )
+from .paper_search import is_topic_query, run_paper_search, _paper_search_enabled
+from .paper_search import is_topic_query, run_paper_search, _paper_search_enabled
 from .reporting import build_report
 from .research import SearchTrace, make_disabled_web_search_tool, make_web_search_tool
 
@@ -753,6 +755,17 @@ async def _run_pipeline_with_openai_compatible(
 
 async def run_pipeline(arxiv_id_or_url: str, model: str = DEFAULT_MODEL) -> str:
     """Run the paper-to-product pipeline using the configured execution backend."""
+    # Phase 0 (optional): PASA-style paper search for topic queries
+    if _paper_search_enabled() and is_topic_query(arxiv_id_or_url):
+        results = await run_paper_search(arxiv_id_or_url, model=model)
+        if not results:
+            raise AgentExecutionError(
+                f"Paper search found no relevant papers for topic: {arxiv_id_or_url}"
+            )
+        top_paper = results[0]
+        print(f"📄 Selected top paper: [{top_paper.arxiv_id}] {top_paper.title}")
+        arxiv_id_or_url = top_paper.arxiv_id
+
     backend_name = get_execution_backend_name()
     if backend_name == OPENAI_COMPATIBLE_BACKEND:
         backend = build_openai_compatible_backend()

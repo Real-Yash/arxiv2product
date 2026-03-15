@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 arxiv2product = "arxiv2product.cli:run"
 arxiv2product-api = "arxiv2product.service:run"
+arxiv2product-compete = "arxiv2product.compete:run"
 
 [tool.uv]
 package = true
