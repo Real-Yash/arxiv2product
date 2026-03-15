@@ -35,7 +35,7 @@ uv run arxiv2product-api
 
 ```bash
 cd cli
-python -m unittest discover -s tests
+uv run python -m unittest discover -s tests
 ```
 
 ## Repository Layout

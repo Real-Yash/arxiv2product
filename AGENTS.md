@@ -8,7 +8,7 @@ Single Python app in `cli/`, with package code under `cli/arxiv2product/` and te
 - `cd cli && uv sync`: install/update the Python environment.
 - `cd cli && uv run arxiv2product 2603.09229`: generate a report from an arXiv ID.
 - `cd cli && uv run arxiv2product-api`: start the local Python API service.
-- `cd cli && python -m unittest discover -s tests`: run the Python test suite.
+- `cd cli && uv run python -m unittest discover -s tests`: run the Python test suite.
 
 ## Coding Style & Naming Conventions
 Follow existing Python conventions in `cli/arxiv2product/`: 4-space indentation, type hints on public functions, `snake_case` for functions/variables, `UPPER_SNAKE_CASE` for prompt constants. Keep orchestration async.
